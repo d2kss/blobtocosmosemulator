@@ -17,6 +17,21 @@
     </ItemGroup>
   </Target>
   <ItemGroup>
+    <Compile Remove="BlobToCosmosFunction.AppHost\**" />
+    <EmbeddedResource Remove="BlobToCosmosFunction.AppHost\**" />
+    <None Remove="BlobToCosmosFunction.AppHost\**" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Remove="HOST-JSON-INFO.md" />
+    <None Remove="README-AZURE-COSMOSDB.md" />
+    <None Remove="README-NO-SSL.md" />
+    <None Remove="README-PHONE-NUMBERS.md" />
+    <None Remove="README.md" />
+    <None Remove="setup-cosmosdb-network-access.ps1" />
+    <None Remove="start-emulators.ps1" />
+    <None Remove="stop-emulators.ps1" />
+  </ItemGroup>
+  <ItemGroup>
     <PackageReference Include="Microsoft.Azure.Functions.Worker" Version="1.23.0" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Sdk" Version="1.18.1" />
     <PackageReference Include="Microsoft.Azure.Functions.Worker.Extensions.Storage.Blobs" Version="6.8.0" />

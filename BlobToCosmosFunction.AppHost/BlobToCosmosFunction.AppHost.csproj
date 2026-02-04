@@ -10,6 +10,10 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <None Remove="README.md" />
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- Aspire.Hosting is included by Aspire.AppHost.Sdk -->
     <PackageReference Include="Aspire.Hosting.Azure.CosmosDB" Version="13.1.0" />
     <PackageReference Include="Aspire.Hosting.Azure.Functions" Version="13.1.0" />

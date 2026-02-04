@@ -11,6 +11,7 @@ public class BlobTriggerFunction
     private readonly IFileParserService _fileParserService;
     private readonly ICosmosDbService _cosmosDbService;
     private readonly IPhoneNumberService _phoneNumberService;
+    private readonly IDncApiService? _dncApiService;
     private readonly ILogger<BlobTriggerFunction> _logger;
 
     public BlobTriggerFunction(
@@ -18,12 +19,14 @@ public class BlobTriggerFunction
         IFileParserService fileParserService,
         ICosmosDbService cosmosDbService,
         IPhoneNumberService phoneNumberService,
-        ILogger<BlobTriggerFunction> logger)
+        ILogger<BlobTriggerFunction> logger,
+        IDncApiService? dncApiService = null)
     {
         _blobStorageService = blobStorageService;
         _fileParserService = fileParserService;
         _cosmosDbService = cosmosDbService;
         _phoneNumberService = phoneNumberService;
+        _dncApiService = dncApiService;
         _logger = logger;
     }
 
@@ -52,10 +55,45 @@ public class BlobTriggerFunction
             // Initialize CosmosDB if needed
             await _cosmosDbService.InitializeAsync();
 
-            // Extract and save phone numbers
+            // Extract phone numbers
             var phoneNumbers = _phoneNumberService.ExtractPhoneNumbers(fileData.Content, blobName);
             if (phoneNumbers.Any())
             {
+                // Register phone numbers with DNC API
+                if (_dncApiService != null)
+                {
+                    try
+                    {
+                        _logger.LogInformation("Registering {Count} phone numbers with DNC API from file '{FileName}'", 
+                            phoneNumbers.Count, blobName);
+                        
+                        var dncResults = await _dncApiService.RegisterDoNotCallBatchAsync(phoneNumbers, blobName);
+                        var dncSuccessCount = dncResults.Count(r => r);
+                        var dncFailureCount = dncResults.Count - dncSuccessCount;
+                        
+                        if (dncFailureCount > 0)
+                        {
+                            _logger.LogWarning("DNC API registration: {SuccessCount} succeeded, {FailureCount} failed for file '{FileName}'", 
+                                dncSuccessCount, dncFailureCount, blobName);
+                        }
+                        else
+                        {
+                            _logger.LogInformation("DNC API registration: All {Count} phone numbers registered successfully for file '{FileName}'", 
+                                phoneNumbers.Count, blobName);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "Error calling DNC API for file '{FileName}'. Continuing with Cosmos DB insert.", blobName);
+                        // Continue with Cosmos DB insert even if DNC API fails
+                    }
+                }
+                else
+                {
+                    _logger.LogWarning("DNC API service not available. Skipping DNC registration for file '{FileName}'", blobName);
+                }
+
+                // Insert phone numbers into Cosmos DB
                 var savedPhoneNumbers = await _cosmosDbService.SavePhoneNumbersAsync(phoneNumbers, blobName);
                 var newNumbers = savedPhoneNumbers.Count(p => p.OccurrenceCount == 1);
                 var duplicates = savedPhoneNumbers.Count - newNumbers;

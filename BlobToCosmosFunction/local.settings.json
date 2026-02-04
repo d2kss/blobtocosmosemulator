@@ -9,6 +9,7 @@
     "CosmosDBContainerName": "ProcessedFiles",
     "CosmosDBPhoneNumbersContainerName": "PhoneNumbers",
     "UseLocalStorage": "false",
-    "LocalStoragePath": "BlobToCosmos_LocalData"
+    "LocalStoragePath": "BlobToCosmos_LocalData",
+    "DncApiBaseUrl": "https://localhost:7242"
   }
 }

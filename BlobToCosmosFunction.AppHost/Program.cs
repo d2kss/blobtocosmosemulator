@@ -1,6 +1,4 @@
-// Aspire AppHost: runs Cosmos DB emulator + Azure Storage (Azurite) + BlobToCosmos Azure Function.
-// See https://aspire.dev/integrations/cloud/azure/azure-cosmos-db/
-// and https://aspire.dev/integrations/cloud/azure/azure-functions/
+
 
 using Aspire.Hosting;
 
