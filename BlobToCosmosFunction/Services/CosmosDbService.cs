@@ -9,6 +9,7 @@ public interface ICosmosDbService
 {
     Task InitializeAsync();
     Task<List<PhoneNumber>> SavePhoneNumbersAsync(List<PhoneNumber> phoneNumbers, string sourceFile);
+    Task<List<PhoneNumber>> GetNewPhoneNumbersAsync(List<PhoneNumber> phoneNumbers);
 }
 
 /// <summary>
@@ -92,7 +93,72 @@ public class CosmosDbService : ICosmosDbService
     }
 
     /// <summary>
-    /// Insert phone numbers into container.
+    /// Identify delta changes - get only new phone numbers that don't exist in Cosmos DB.
+    /// Uses NormalizedNumber as the unique identifier to check for duplicates.
+    /// </summary>
+    public async Task<List<PhoneNumber>> GetNewPhoneNumbersAsync(List<PhoneNumber> phoneNumbers)
+    {
+        if (phoneNumbers == null || phoneNumbers.Count == 0)
+        {
+            return new List<PhoneNumber>();
+        }
+
+        try
+        {
+            if (_container == null)
+            {
+                await InitializeAsync();
+            }
+
+            var newPhoneNumbers = new List<PhoneNumber>();
+
+            foreach (var phoneNumber in phoneNumbers)
+            {
+                try
+                {
+                    // Check if phone number already exists in Cosmos DB by querying with NormalizedNumber
+                    // Since NormalizedNumber is the partition key, we can use it to check existence efficiently
+                    var query = new QueryDefinition("SELECT * FROM c WHERE c.NormalizedNumber = @normalizedNumber")
+                        .WithParameter("@normalizedNumber", phoneNumber.NormalizedNumber);
+
+                    var queryIterator = _container!.GetItemQueryIterator<PhoneNumber>(
+                        query,
+                        requestOptions: new QueryRequestOptions
+                        {
+                            PartitionKey = new PartitionKey(phoneNumber.NormalizedNumber)
+                        });
+
+                    var results = await queryIterator.ReadNextAsync();
+
+                    // If no results found, it's a new phone number (delta)
+                    if (!results.Any())
+                    {
+                        newPhoneNumbers.Add(phoneNumber);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Error checking if phone number '{PhoneNumber}' exists. Treating as new.", 
+                        phoneNumber?.NormalizedNumber ?? "unknown");
+                    // On error, treat as new to be safe
+                    newPhoneNumbers.Add(phoneNumber);
+                }
+            }
+
+            _logger.LogInformation("Identified {NewCount} new phone numbers out of {TotalCount} (delta changes)", 
+                newPhoneNumbers.Count, phoneNumbers.Count);
+
+            return newPhoneNumbers;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error identifying new phone numbers");
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Insert phone numbers into container (only new ones - delta changes).
     /// </summary>
     public async Task<List<PhoneNumber>> SavePhoneNumbersAsync(List<PhoneNumber> phoneNumbers, string sourceFile)
     {
@@ -109,30 +175,60 @@ public class CosmosDbService : ICosmosDbService
                 await InitializeAsync();
             }
 
+            // Identify delta changes - only get new phone numbers
+            var newPhoneNumbers = await GetNewPhoneNumbersAsync(phoneNumbers);
+            
+            if (newPhoneNumbers.Count == 0)
+            {
+                _logger.LogInformation("No new phone numbers to insert from source '{SourceFile}'. All are duplicates.", sourceFile);
+                return new List<PhoneNumber>();
+            }
+
             var saved = new List<PhoneNumber>();
             var failed = 0;
 
-            foreach (var phoneNumber in phoneNumbers)
+            // Insert only new phone numbers (delta changes)
+            foreach (var phoneNumber in newPhoneNumbers)
             {
                 try
                 {
                     phoneNumber.SourceFile = sourceFile;
-                    var response = await _container!.UpsertItemAsync(
+                    phoneNumber.FirstSeenAt = DateTime.UtcNow;
+                    phoneNumber.LastSeenAt = DateTime.UtcNow;
+                    phoneNumber.OccurrenceCount = 1;
+                    
+                    if (phoneNumber.SourceFiles == null)
+                    {
+                        phoneNumber.SourceFiles = new List<string>();
+                    }
+                    if (!phoneNumber.SourceFiles.Contains(sourceFile))
+                    {
+                        phoneNumber.SourceFiles.Add(sourceFile);
+                    }
+
+                    var response = await _container!.CreateItemAsync(
                         item: phoneNumber,
                         partitionKey: new PartitionKey(phoneNumber.NormalizedNumber));
                     saved.Add(response.Resource);
                 }
+                catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Conflict)
+                {
+                    // Conflict - item was inserted by another process, skip
+                    failed++;
+                    _logger.LogWarning("Phone number '{PhoneNumber}' already exists (conflict). Skipping.", 
+                        phoneNumber?.NormalizedNumber ?? "unknown");
+                }
                 catch (CosmosException ex)
                 {
                     failed++;
-                    _logger.LogError(ex, "Failed to upsert phone number '{PhoneNumber}' from source '{SourceFile}'. Status: {StatusCode}", 
+                    _logger.LogError(ex, "Failed to insert phone number '{PhoneNumber}' from source '{SourceFile}'. Status: {StatusCode}", 
                         phoneNumber?.NormalizedNumber ?? "unknown", sourceFile, ex.StatusCode);
                     // Continue with next item instead of failing entire batch
                 }
                 catch (Exception ex)
                 {
                     failed++;
-                    _logger.LogError(ex, "Unexpected error upserting phone number '{PhoneNumber}' from source '{SourceFile}'", 
+                    _logger.LogError(ex, "Unexpected error inserting phone number '{PhoneNumber}' from source '{SourceFile}'", 
                         phoneNumber?.NormalizedNumber ?? "unknown", sourceFile);
                     // Continue with next item instead of failing entire batch
                 }
@@ -140,12 +236,13 @@ public class CosmosDbService : ICosmosDbService
 
             if (failed > 0)
             {
-                _logger.LogWarning("Successfully inserted {SuccessCount} phone numbers, {FailedCount} failed from source '{SourceFile}'", 
+                _logger.LogWarning("Successfully inserted {SuccessCount} new phone numbers, {FailedCount} failed from source '{SourceFile}'", 
                     saved.Count, failed, sourceFile);
             }
             else
             {
-                _logger.LogInformation("Successfully inserted {Count} phone numbers from source '{SourceFile}'", saved.Count, sourceFile);
+                _logger.LogInformation("Successfully inserted {Count} new phone numbers (delta changes) from source '{SourceFile}'", 
+                    saved.Count, sourceFile);
             }
 
             return saved;

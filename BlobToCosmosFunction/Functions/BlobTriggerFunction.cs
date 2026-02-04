@@ -11,7 +11,6 @@ public class BlobTriggerFunction
     private readonly IFileParserService _fileParserService;
     private readonly ICosmosDbService _cosmosDbService;
     private readonly IPhoneNumberService _phoneNumberService;
-    private readonly IDncApiService? _dncApiService;
     private readonly ILogger<BlobTriggerFunction> _logger;
 
     public BlobTriggerFunction(
@@ -19,14 +18,12 @@ public class BlobTriggerFunction
         IFileParserService fileParserService,
         ICosmosDbService cosmosDbService,
         IPhoneNumberService phoneNumberService,
-        ILogger<BlobTriggerFunction> logger,
-        IDncApiService? dncApiService = null)
+        ILogger<BlobTriggerFunction> logger)
     {
         _blobStorageService = blobStorageService;
         _fileParserService = fileParserService;
         _cosmosDbService = cosmosDbService;
         _phoneNumberService = phoneNumberService;
-        _dncApiService = dncApiService;
         _logger = logger;
     }
 
@@ -55,54 +52,47 @@ public class BlobTriggerFunction
             // Initialize CosmosDB if needed
             await _cosmosDbService.InitializeAsync();
 
-            // Extract phone numbers
+            // Extract phone numbers from blob content
             var phoneNumbers = _phoneNumberService.ExtractPhoneNumbers(fileData.Content, blobName);
             if (phoneNumbers.Any())
             {
-                // Register phone numbers with DNC API
-                if (_dncApiService != null)
-                {
-                    try
-                    {
-                        _logger.LogInformation("Registering {Count} phone numbers with DNC API from file '{FileName}'", 
-                            phoneNumbers.Count, blobName);
-                        
-                        var dncResults = await _dncApiService.RegisterDoNotCallBatchAsync(phoneNumbers, blobName);
-                        var dncSuccessCount = dncResults.Count(r => r);
-                        var dncFailureCount = dncResults.Count - dncSuccessCount;
-                        
-                        if (dncFailureCount > 0)
-                        {
-                            _logger.LogWarning("DNC API registration: {SuccessCount} succeeded, {FailureCount} failed for file '{FileName}'", 
-                                dncSuccessCount, dncFailureCount, blobName);
-                        }
-                        else
-                        {
-                            _logger.LogInformation("DNC API registration: All {Count} phone numbers registered successfully for file '{FileName}'", 
-                                phoneNumbers.Count, blobName);
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        _logger.LogError(ex, "Error calling DNC API for file '{FileName}'. Continuing with Cosmos DB insert.", blobName);
-                        // Continue with Cosmos DB insert even if DNC API fails
-                    }
-                }
-                else
-                {
-                    _logger.LogWarning("DNC API service not available. Skipping DNC registration for file '{FileName}'", blobName);
-                }
-
-                // Insert phone numbers into Cosmos DB
+                // Save phone numbers directly to Cosmos DB (identify delta changes - only insert new phone numbers)
                 var savedPhoneNumbers = await _cosmosDbService.SavePhoneNumbersAsync(phoneNumbers, blobName);
-                var newNumbers = savedPhoneNumbers.Count(p => p.OccurrenceCount == 1);
-                var duplicates = savedPhoneNumbers.Count - newNumbers;
                 
-                _logger.LogInformation(
-                    "Processed phone numbers. New: {NewCount}, Duplicates ignored: {DuplicateCount}, Total saved: {TotalCount}",
-                    newNumbers,
-                    duplicates,
-                    savedPhoneNumbers.Count);
+               
+
+                // TODO: Insert new phone numbers into API
+                // The savedPhoneNumbers list contains only the new phone numbers (delta changes) that were inserted into Cosmos DB.
+                // These phone numbers need to be sent to the external API for further processing.
+                if (savedPhoneNumbers.Any())
+                {
+                    _logger.LogInformation("Found {Count} new phone numbers ready for API insertion", savedPhoneNumbers.Count);
+                    
+                    foreach (var phoneNumber in savedPhoneNumbers)
+                    {
+                        try
+                        {
+                            // TODO: Insert each new phone number into API
+                            // Example: await _apiService.InsertPhoneNumberAsync(phoneNumber);
+                            // The phoneNumber object contains all the details needed for API insertion:
+                            // - phoneNumber.Number: The original phone number format
+                            // - phoneNumber.NormalizedNumber: The normalized phone number (digits only)
+                            // - phoneNumber.Id: Unique identifier
+                            // - phoneNumber.SourceFile: Source file name
+                            // - phoneNumber.FirstSeenAt: First seen timestamp
+                            
+                            _logger.LogDebug("Processing phone number '{PhoneNumber}' for API insertion", phoneNumber.NormalizedNumber);
+                        }
+                        catch (Exception ex)
+                        {
+                            _logger.LogError(ex, "Error processing phone number '{PhoneNumber}' for API insertion", 
+                                phoneNumber?.NormalizedNumber ?? "unknown");
+                            // Continue with next phone number instead of failing entire batch
+                        }
+                    }
+                    
+                    _logger.LogInformation("Completed processing {Count} new phone numbers for API insertion", savedPhoneNumbers.Count);
+                }
             }
             else
             {

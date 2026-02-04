@@ -22,20 +22,6 @@ var host = new HostBuilder()
         services.AddSingleton<IFileParserService, FileParserService>();
         services.AddSingleton<IPhoneNumberService, PhoneNumberService>();
 
-        // Register HttpClient for DNC API service
-        var dncApiBaseUrl = context.Configuration["DncApiBaseUrl"] 
-            ?? context.Configuration["DncApi:BaseUrl"]
-            ?? "https://localhost:7242";
-        
-        services.AddHttpClient<IDncApiService, DncApiService>(client =>
-        {
-            client.BaseAddress = new Uri(dncApiBaseUrl);
-            client.Timeout = TimeSpan.FromSeconds(30);
-        }).ConfigurePrimaryHttpMessageHandler(() => new HttpClientHandler
-        {
-            ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-        });
-
         // Use local JSON storage (no SSL) when corporate firewall blocks Cosmos DB emulator
         var useLocalStorage = context.Configuration["UseLocalStorage"];
         if (string.Equals(useLocalStorage, "true", StringComparison.OrdinalIgnoreCase))
