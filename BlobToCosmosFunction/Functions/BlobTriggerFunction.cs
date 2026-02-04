@@ -52,10 +52,7 @@ public class BlobTriggerFunction
             // Initialize CosmosDB if needed
             await _cosmosDbService.InitializeAsync();
 
-            // Save file metadata to CosmosDB
-            await _cosmosDbService.SaveFileDataAsync(fileData);
-
-            // Extract and save phone numbers (with duplicate checking)
+            // Extract and save phone numbers
             var phoneNumbers = _phoneNumberService.ExtractPhoneNumbers(fileData.Content, blobName);
             if (phoneNumbers.Any())
             {

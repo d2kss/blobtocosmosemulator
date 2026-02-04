@@ -1,7 +1,3 @@
-using System.Net;
-using System.Net.Security;
-using System.Security.Authentication;
-using System.Security.Cryptography.X509Certificates;
 using BlobToCosmosFunction.Models;
 using Microsoft.Azure.Cosmos;
 using Microsoft.Extensions.Configuration;
@@ -12,417 +8,83 @@ namespace BlobToCosmosFunction.Services;
 public interface ICosmosDbService
 {
     Task InitializeAsync();
-    Task<FileData> SaveFileDataAsync(FileData fileData);
     Task<List<PhoneNumber>> SavePhoneNumbersAsync(List<PhoneNumber> phoneNumbers, string sourceFile);
-    Task<PhoneNumber?> GetPhoneNumberByNormalizedAsync(string normalizedNumber);
 }
 
 /// <summary>
-/// Generic Cosmos DB service that works with both the local Cosmos DB emulator and Azure Cosmos DB.
-/// Target is inferred from the connection string: localhost/127.0.0.1:8081 = emulator; otherwise Azure.
-/// Use the same <c>CosmosDBConnection</c> in config for either environment.
+/// Simple Cosmos DB service to create database and insert phone numbers.
 /// </summary>
 public class CosmosDbService : ICosmosDbService
 {
     private readonly CosmosClient _cosmosClient;
     private readonly string _databaseName;
-    private readonly string _fileDataContainerName;
-    private readonly string _phoneNumbersContainerName;
+    private readonly string _containerName;
     private readonly ILogger<CosmosDbService> _logger;
     private Database? _database;
-    private Container? _fileDataContainer;
-    private Container? _phoneNumbersContainer;
+    private Container? _container;
 
     public CosmosDbService(
         IConfiguration configuration,
         ILogger<CosmosDbService> logger)
     {
         _logger = logger;
-        // Support both local.settings.json (CosmosDBConnection) and Aspire-injected config (ConnectionStrings:CosmosDB)
+
+        // Get connection string
         var connectionString = configuration["CosmosDBConnection"]
             ?? configuration["ConnectionStrings:CosmosDB"]
-            ?? configuration["CosmosDB:ConnectionString"]
-            ?? configuration["COSMOSDB_CONNECTIONSTRING"]
-            ?? throw new InvalidOperationException(
-                "Cosmos DB connection not configured. Set CosmosDBConnection (or ConnectionStrings:CosmosDB when using Aspire).");
-
-        // Aspire injects a proxy URL (e.g. https://localhost:59029). The Cosmos SDK then switches to the container's
-        // internal IP and fails from the host. Replace proxy with direct host endpoint so the program can connect.
-        connectionString = UseDirectEmulatorEndpointIfAspireProxy(connectionString);
+            ?? throw new InvalidOperationException("Cosmos DB connection not configured.");
 
         _databaseName = configuration["CosmosDBDatabaseName"] ?? "BlobDataDB";
-        _fileDataContainerName = configuration["CosmosDBContainerName"] ?? "ProcessedFiles";
-        _phoneNumbersContainerName = configuration["CosmosDBPhoneNumbersContainerName"] ?? "PhoneNumbers";
+        _containerName = configuration["CosmosDBPhoneNumbersContainerName"] ?? "PhoneNumbers";
 
-        var isEmulator = IsEmulatorConnectionString(connectionString);
-        connectionString = PrepareConnectionString(connectionString, isEmulator);
-        var cosmosClientOptions = BuildCosmosClientOptions(isEmulator);
-
-        _cosmosClient = new CosmosClient(connectionString, cosmosClientOptions);
-        _logger.LogInformation(
-            "CosmosDB (generic): {Mode}. Database: {DatabaseName}, Containers: {FileContainer}, {PhoneContainer}",
-            isEmulator ? "Emulator" : "Azure",
-            _databaseName, _fileDataContainerName, _phoneNumbersContainerName);
-    }
-
-    /// <summary>If Aspire injected a proxy URL (localhost:non-8081), replace with direct host endpoint so the SDK does not switch to container IP.</summary>
-    private static string UseDirectEmulatorEndpointIfAspireProxy(string connectionString)
-    {
-        if (string.IsNullOrWhiteSpace(connectionString)) return connectionString;
-        // Aspire DCP proxy: AccountEndpoint=https://localhost:59029/ or similar. Direct emulator is 127.0.0.1:8081.
-        const string directEmulatorEndpoint = "https://127.0.0.1:8081/";
-        if (connectionString.Contains("AccountEndpoint=", StringComparison.OrdinalIgnoreCase)
-            && connectionString.Contains("localhost:", StringComparison.OrdinalIgnoreCase)
-            && !connectionString.Contains("localhost:8081", StringComparison.OrdinalIgnoreCase))
+        // Build options with SSL bypass for emulator
+        CosmosClientOptions options = new()
         {
-            var idx = connectionString.IndexOf("AccountEndpoint=", StringComparison.OrdinalIgnoreCase);
-            var start = idx + "AccountEndpoint=".Length;
-            var end = connectionString.IndexOf(';', start);
-            if (end < 0) end = connectionString.Length;
-            var existingEndpoint = connectionString.Substring(start, end - start).Trim();
-            if (existingEndpoint.StartsWith("https://localhost:", StringComparison.OrdinalIgnoreCase))
+            HttpClientFactory = () => new HttpClient(new HttpClientHandler()
             {
-                connectionString = connectionString.Substring(0, start) + directEmulatorEndpoint
-                    + connectionString.Substring(end);
-            }
-        }
-        return connectionString;
-    }
-
-    /// <summary>True if connection string points to local Cosmos DB emulator (port 8081 or localhost/127.0.0.1:8081).</summary>
-    private static bool IsEmulatorConnectionString(string connectionString)
-    {
-        if (string.IsNullOrWhiteSpace(connectionString)) return false;
-        return connectionString.Contains(":8081", StringComparison.OrdinalIgnoreCase)
-               || connectionString.Contains("localhost:8081", StringComparison.OrdinalIgnoreCase)
-               || connectionString.Contains("127.0.0.1:8081", StringComparison.OrdinalIgnoreCase);
-    }
-
-    /// <summary>Prepares connection string for the detected target (emulator vs Azure).</summary>
-    private static string PrepareConnectionString(string connectionString, bool isEmulator)
-    {
-        if (!isEmulator)
-            return connectionString;
-
-        connectionString = connectionString
-            .Replace("https://localhost:8081", "https://127.0.0.1:8081", StringComparison.OrdinalIgnoreCase)
-            .Replace("https://localhost:8081/", "https://127.0.0.1:8081/", StringComparison.OrdinalIgnoreCase);
-        if (!connectionString.Contains("DisableServerCertificateValidation", StringComparison.OrdinalIgnoreCase))
-            connectionString = connectionString.TrimEnd(';') + ";DisableServerCertificateValidation=True;";
-        return connectionString;
-    }
-
-    /// <summary>Builds CosmosClientOptions for either emulator (SSL bypass) or Azure (standard).</summary>
-    /// <remarks>
-    /// For emulator: Uses Microsoft's recommended approach to disable SSL certificate validation.
-    /// See: https://learn.microsoft.com/en-us/azure/cosmos-db/how-to-develop-emulator?tabs=windows%2Ccsharp&pivots=api-nosql
-    /// </remarks>
-    private static CosmosClientOptions BuildCosmosClientOptions(bool isEmulator)
-    {
-        if (isEmulator)
-        {
-            // Microsoft recommended approach for disabling SSL validation with Cosmos DB emulator
-            // This is required when using the emulator in a container and SSL certificate is not imported
-            CosmosClientOptions options = new()
-            {
-                HttpClientFactory = () => new HttpClient(new HttpClientHandler()
-                {
-                    ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
-                }),
-                ConnectionMode = ConnectionMode.Gateway,
-                RequestTimeout = TimeSpan.FromSeconds(30),
-                MaxRetryAttemptsOnRateLimitedRequests = 3,
-                MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30)
-            };
-            return options;
-        }
-
-        // Standard options for Azure Cosmos DB (production)
-        return new CosmosClientOptions
-        {
-            ConnectionMode = ConnectionMode.Gateway,
-            RequestTimeout = TimeSpan.FromSeconds(30),
-            MaxRetryAttemptsOnRateLimitedRequests = 3,
-            MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30)
+                ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+            }),
+            ConnectionMode = ConnectionMode.Gateway
         };
+
+        // Create CosmosClient
+        _cosmosClient = new CosmosClient(connectionString, options);
     }
 
+    /// <summary>
+    /// Create database if it doesn't exist.
+    /// </summary>
     public async Task InitializeAsync()
     {
-        try
-        {
-            _logger.LogInformation("Initializing CosmosDB database and container...");
-            _logger.LogInformation("Connecting to CosmosDB at: {Endpoint}", _cosmosClient.Endpoint?.ToString() ?? "unknown");
-
-            // Skip ReadAccountAsync (often fails with SSL on emulator). Create database directly with retry.
-            const int maxRetries = 5;
-            const int delayMs = 3000;
-            Exception? lastEx = null;
-            for (int attempt = 1; attempt <= maxRetries; attempt++)
-            {
-                try
-                {
-                    _database = await _cosmosClient.CreateDatabaseIfNotExistsAsync(_databaseName);
-                    _logger.LogInformation("Successfully connected to CosmosDB. Database: {DatabaseName}", _databaseName);
-                    lastEx = null;
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    lastEx = ex;
-                    _logger.LogWarning(ex, "CosmosDB init attempt {Attempt}/{Max} failed. Retrying in {Delay}ms...", attempt, maxRetries, delayMs);
-                    if (attempt < maxRetries)
-                        await Task.Delay(delayMs);
-                }
-            }
-            if (lastEx != null || _database == null)
-            {
-                var ex = lastEx ?? new InvalidOperationException("Database creation returned null");
-                _logger.LogError(ex, "Failed to connect to CosmosDB after {Max} attempts", maxRetries);
-                var hint = (lastEx?.Message?.Contains("SSL", StringComparison.OrdinalIgnoreCase) == true ||
-                            lastEx?.Message?.Contains("certificate", StringComparison.OrdinalIgnoreCase) == true)
-                    ? " If SSL/certificate errors persist (e.g. corporate proxy or emulator), set \"UseLocalStorage\": \"true\" in local.settings.json to use local JSON storage instead."
-                    : "";
-                throw new InvalidOperationException($"Cannot connect to CosmosDB. Check connection string and that the service is reachable. Error: {ex.Message}.{hint}", ex);
-            }
-
-            // Create database already done above; continue with containers
-            _logger.LogInformation("Database '{DatabaseName}' is ready", _databaseName);
-
-            // Create FileData container if it doesn't exist
-            var fileDataContainerProperties = new ContainerProperties(_fileDataContainerName, "/id")
-            {
-                IndexingPolicy = new IndexingPolicy
-                {
-                    Automatic = true,
-                    IndexingMode = IndexingMode.Consistent,
-                    IncludedPaths =
-                    {
-                        new IncludedPath { Path = "/" }  // Required root path
-                    }
-                }
-            };
-
-            _fileDataContainer = await _database.CreateContainerIfNotExistsAsync(fileDataContainerProperties);
-            _logger.LogInformation("Container '{ContainerName}' is ready", _fileDataContainerName);
-
-            // Create PhoneNumbers container if it doesn't exist
-            // Use NormalizedNumber as partition key for efficient lookups
-            var phoneNumbersContainerProperties = new ContainerProperties(_phoneNumbersContainerName, "/NormalizedNumber")
-            {
-                IndexingPolicy = new IndexingPolicy
-                {
-                    Automatic = true,
-                    IndexingMode = IndexingMode.Consistent,
-                    IncludedPaths =
-                    {
-                        new IncludedPath { Path = "/" },  // Required root path (must be first)
-                        new IncludedPath { Path = "/NormalizedNumber/?" },
-                        new IncludedPath { Path = "/Number/?" },
-                        new IncludedPath { Path = "/SourceFile/?" }
-                    }
-                }
-            };
-
-            _phoneNumbersContainer = await _database.CreateContainerIfNotExistsAsync(phoneNumbersContainerProperties);
-            _logger.LogInformation("Container '{ContainerName}' is ready", _phoneNumbersContainerName);
-        }
-        catch (CosmosException cosmosEx)
-        {
-            _logger.LogError(
-                cosmosEx,
-                "CosmosDB error initializing. StatusCode: {StatusCode}, SubStatusCode: {SubStatusCode}, Message: {Message}, ActivityId: {ActivityId}",
-                cosmosEx.StatusCode,
-                cosmosEx.SubStatusCode,
-                cosmosEx.Message,
-                cosmosEx.ActivityId);
-            throw;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error initializing CosmosDB: {Message}", ex.Message);
-            throw;
-        }
+        _database = await _cosmosClient.CreateDatabaseIfNotExistsAsync(_databaseName);
+        _container = await _database.CreateContainerIfNotExistsAsync(
+            id: _containerName,
+            partitionKeyPath: "/NormalizedNumber");
+        
+        _logger.LogInformation("Database '{DatabaseName}' and container '{ContainerName}' ready", _databaseName, _containerName);
     }
 
-    public async Task<FileData> SaveFileDataAsync(FileData fileData)
-    {
-        if (_fileDataContainer == null)
-        {
-            await InitializeAsync();
-        }
-
-        try
-        {
-            // Ensure Id is set
-            if (string.IsNullOrEmpty(fileData.Id))
-            {
-                fileData.Id = Guid.NewGuid().ToString();
-                _logger.LogWarning("FileData.Id was empty, generated new Id: {Id}", fileData.Id);
-            }
-
-            _logger.LogInformation("Saving file data to CosmosDB: {FileName}, Id: {Id}", fileData.FileName, fileData.Id);
-
-            var response = await _fileDataContainer!.CreateItemAsync(
-                fileData,
-                new PartitionKey(fileData.Id));
-
-            _logger.LogInformation(
-                "Successfully saved file data. File: {FileName}, RequestCharge: {RequestCharge}",
-                fileData.FileName,
-                response.RequestCharge);
-
-            return response.Resource;
-        }
-        catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
-        {
-            _logger.LogWarning("Item with id {Id} already exists, updating instead", fileData.Id);
-            var response = await _fileDataContainer!.UpsertItemAsync(
-                fileData,
-                new PartitionKey(fileData.Id));
-            return response.Resource;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error saving file data to CosmosDB: {FileName}", fileData.FileName);
-            throw;
-        }
-    }
-
+    /// <summary>
+    /// Insert phone numbers into container.
+    /// </summary>
     public async Task<List<PhoneNumber>> SavePhoneNumbersAsync(List<PhoneNumber> phoneNumbers, string sourceFile)
     {
-        if (_phoneNumbersContainer == null)
+        if (_container == null)
         {
             await InitializeAsync();
         }
 
-        var savedNumbers = new List<PhoneNumber>();
-        var newCount = 0;
-        var duplicateCount = 0;
-        var updatedCount = 0;
-
-        try
+        var saved = new List<PhoneNumber>();
+        foreach (var phoneNumber in phoneNumbers)
         {
-            _logger.LogInformation("Processing {Count} phone numbers from {SourceFile}", phoneNumbers.Count, sourceFile);
-
-            foreach (var phoneNumber in phoneNumbers)
-            {
-                try
-                {
-                    // Check if phone number already exists
-                    var existing = await GetPhoneNumberByNormalizedAsync(phoneNumber.NormalizedNumber);
-
-                    if (existing != null)
-                    {
-                        // Phone number exists - update it
-                        existing.LastSeenAt = DateTime.UtcNow;
-                        existing.OccurrenceCount++;
-                        
-                        // Add source file if not already in the list
-                        if (!existing.SourceFiles.Contains(sourceFile))
-                        {
-                            existing.SourceFiles.Add(sourceFile);
-                        }
-
-                        var response = await _phoneNumbersContainer!.UpsertItemAsync(
-                            existing,
-                            new PartitionKey(existing.NormalizedNumber));
-
-                        savedNumbers.Add(response.Resource);
-                        duplicateCount++;
-                        updatedCount++;
-                        
-                        _logger.LogDebug(
-                            "Updated existing phone number: {Number} (seen {Count} times)",
-                            phoneNumber.Number,
-                            existing.OccurrenceCount);
-                    }
-                    else
-                    {
-                        // New phone number - insert it
-                        var response = await _phoneNumbersContainer!.CreateItemAsync(
-                            phoneNumber,
-                            new PartitionKey(phoneNumber.NormalizedNumber));
-
-                        savedNumbers.Add(response.Resource);
-                        newCount++;
-                        
-                        _logger.LogDebug("Inserted new phone number: {Number}", phoneNumber.Number);
-                    }
-                }
-                catch (CosmosException ex) when (ex.StatusCode == HttpStatusCode.Conflict)
-                {
-                    // Handle race condition - another process might have inserted it
-                    _logger.LogWarning("Conflict inserting phone number {Number}, retrying lookup", phoneNumber.Number);
-                    var existing = await GetPhoneNumberByNormalizedAsync(phoneNumber.NormalizedNumber);
-                    if (existing != null)
-                    {
-                        existing.LastSeenAt = DateTime.UtcNow;
-                        existing.OccurrenceCount++;
-                        if (!existing.SourceFiles.Contains(sourceFile))
-                        {
-                            existing.SourceFiles.Add(sourceFile);
-                        }
-                        var response = await _phoneNumbersContainer!.UpsertItemAsync(
-                            existing,
-                            new PartitionKey(existing.NormalizedNumber));
-                        savedNumbers.Add(response.Resource);
-                        duplicateCount++;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogError(ex, "Error saving phone number: {Number}", phoneNumber.Number);
-                    // Continue with next phone number
-                }
-            }
-
-            _logger.LogInformation(
-                "Phone number processing completed. New: {NewCount}, Duplicates: {DuplicateCount}, Updated: {UpdatedCount}, Total: {TotalCount}",
-                newCount,
-                duplicateCount,
-                updatedCount,
-                savedNumbers.Count);
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error saving phone numbers to CosmosDB");
-            throw;
+            phoneNumber.SourceFile = sourceFile;
+            var response = await _container!.UpsertItemAsync(
+                item: phoneNumber,
+                partitionKey: new PartitionKey(phoneNumber.NormalizedNumber));
+            saved.Add(response.Resource);
         }
 
-        return savedNumbers;
-    }
-
-    public async Task<PhoneNumber?> GetPhoneNumberByNormalizedAsync(string normalizedNumber)
-    {
-        if (_phoneNumbersContainer == null)
-        {
-            await InitializeAsync();
-        }
-
-        try
-        {
-            var query = new QueryDefinition("SELECT * FROM c WHERE c.NormalizedNumber = @normalizedNumber")
-                .WithParameter("@normalizedNumber", normalizedNumber);
-
-            var iterator = _phoneNumbersContainer!.GetItemQueryIterator<PhoneNumber>(
-                query,
-                requestOptions: new QueryRequestOptions
-                {
-                    PartitionKey = new PartitionKey(normalizedNumber)
-                });
-
-            if (iterator.HasMoreResults)
-            {
-                var response = await iterator.ReadNextAsync();
-                return response.FirstOrDefault();
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error querying phone number: {NormalizedNumber}", normalizedNumber);
-        }
-
-        return null;
+        _logger.LogInformation("Inserted {Count} phone numbers", saved.Count);
+        return saved;
     }
 }

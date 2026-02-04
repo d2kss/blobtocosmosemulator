@@ -62,8 +62,9 @@ static void TryEnableEmulatorSslBypass()
         var path = Path.Combine(AppContext.BaseDirectory, "local.settings.json");
         if (!File.Exists(path)) return;
         var json = File.ReadAllText(path);
-        var isEmulator = json.Contains("localhost:8081", StringComparison.OrdinalIgnoreCase)
-                         || json.Contains("127.0.0.1:8081", StringComparison.OrdinalIgnoreCase);
+        // Check for any localhost port (emulator can run on any port)
+        var isEmulator = json.Contains("localhost:", StringComparison.OrdinalIgnoreCase)
+                         || json.Contains("127.0.0.1:", StringComparison.OrdinalIgnoreCase);
         if (!isEmulator) return;
         ServicePointManager.ServerCertificateValidationCallback = (_, _, _, _) => true;
     }
