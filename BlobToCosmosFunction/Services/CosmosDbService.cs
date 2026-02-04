@@ -113,33 +113,38 @@ public class CosmosDbService : ICosmosDbService
     }
 
     /// <summary>Builds CosmosClientOptions for either emulator (SSL bypass) or Azure (standard).</summary>
+    /// <remarks>
+    /// For emulator: Uses Microsoft's recommended approach to disable SSL certificate validation.
+    /// See: https://learn.microsoft.com/en-us/azure/cosmos-db/how-to-develop-emulator?tabs=windows%2Ccsharp&pivots=api-nosql
+    /// </remarks>
     private static CosmosClientOptions BuildCosmosClientOptions(bool isEmulator)
     {
-        var options = new CosmosClientOptions
+        if (isEmulator)
+        {
+            // Microsoft recommended approach for disabling SSL validation with Cosmos DB emulator
+            // This is required when using the emulator in a container and SSL certificate is not imported
+            CosmosClientOptions options = new()
+            {
+                HttpClientFactory = () => new HttpClient(new HttpClientHandler()
+                {
+                    ServerCertificateCustomValidationCallback = HttpClientHandler.DangerousAcceptAnyServerCertificateValidator
+                }),
+                ConnectionMode = ConnectionMode.Gateway,
+                RequestTimeout = TimeSpan.FromSeconds(30),
+                MaxRetryAttemptsOnRateLimitedRequests = 3,
+                MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30)
+            };
+            return options;
+        }
+
+        // Standard options for Azure Cosmos DB (production)
+        return new CosmosClientOptions
         {
             ConnectionMode = ConnectionMode.Gateway,
             RequestTimeout = TimeSpan.FromSeconds(30),
             MaxRetryAttemptsOnRateLimitedRequests = 3,
             MaxRetryWaitTimeOnRateLimitedRequests = TimeSpan.FromSeconds(30)
         };
-
-        if (!isEmulator)
-            return options;
-
-        options.ServerCertificateCustomValidationCallback = (X509Certificate2 _, X509Chain _, SslPolicyErrors _) => true;
-        options.HttpClientFactory = () =>
-        {
-            var handler = new SocketsHttpHandler
-            {
-                SslOptions = new SslClientAuthenticationOptions
-                {
-                    EnabledSslProtocols = SslProtocols.Tls12,
-                    RemoteCertificateValidationCallback = (_, _, _, _) => true
-                }
-            };
-            return new HttpClient(handler);
-        };
-        return options;
     }
 
     public async Task InitializeAsync()
