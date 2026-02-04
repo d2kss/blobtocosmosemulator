@@ -46,6 +46,10 @@ public class CosmosDbService : ICosmosDbService
             ?? throw new InvalidOperationException(
                 "Cosmos DB connection not configured. Set CosmosDBConnection (or ConnectionStrings:CosmosDB when using Aspire).");
 
+        // Aspire injects a proxy URL (e.g. https://localhost:59029). The Cosmos SDK then switches to the container's
+        // internal IP and fails from the host. Replace proxy with direct host endpoint so the program can connect.
+        connectionString = UseDirectEmulatorEndpointIfAspireProxy(connectionString);
+
         _databaseName = configuration["CosmosDBDatabaseName"] ?? "BlobDataDB";
         _fileDataContainerName = configuration["CosmosDBContainerName"] ?? "ProcessedFiles";
         _phoneNumbersContainerName = configuration["CosmosDBPhoneNumbersContainerName"] ?? "PhoneNumbers";
@@ -61,11 +65,36 @@ public class CosmosDbService : ICosmosDbService
             _databaseName, _fileDataContainerName, _phoneNumbersContainerName);
     }
 
-    /// <summary>True if connection string points to local Cosmos DB emulator (localhost or 127.0.0.1:8081).</summary>
+    /// <summary>If Aspire injected a proxy URL (localhost:non-8081), replace with direct host endpoint so the SDK does not switch to container IP.</summary>
+    private static string UseDirectEmulatorEndpointIfAspireProxy(string connectionString)
+    {
+        if (string.IsNullOrWhiteSpace(connectionString)) return connectionString;
+        // Aspire DCP proxy: AccountEndpoint=https://localhost:59029/ or similar. Direct emulator is 127.0.0.1:8081.
+        const string directEmulatorEndpoint = "https://127.0.0.1:8081/";
+        if (connectionString.Contains("AccountEndpoint=", StringComparison.OrdinalIgnoreCase)
+            && connectionString.Contains("localhost:", StringComparison.OrdinalIgnoreCase)
+            && !connectionString.Contains("localhost:8081", StringComparison.OrdinalIgnoreCase))
+        {
+            var idx = connectionString.IndexOf("AccountEndpoint=", StringComparison.OrdinalIgnoreCase);
+            var start = idx + "AccountEndpoint=".Length;
+            var end = connectionString.IndexOf(';', start);
+            if (end < 0) end = connectionString.Length;
+            var existingEndpoint = connectionString.Substring(start, end - start).Trim();
+            if (existingEndpoint.StartsWith("https://localhost:", StringComparison.OrdinalIgnoreCase))
+            {
+                connectionString = connectionString.Substring(0, start) + directEmulatorEndpoint
+                    + connectionString.Substring(end);
+            }
+        }
+        return connectionString;
+    }
+
+    /// <summary>True if connection string points to local Cosmos DB emulator (port 8081 or localhost/127.0.0.1:8081).</summary>
     private static bool IsEmulatorConnectionString(string connectionString)
     {
         if (string.IsNullOrWhiteSpace(connectionString)) return false;
-        return connectionString.Contains("localhost:8081", StringComparison.OrdinalIgnoreCase)
+        return connectionString.Contains(":8081", StringComparison.OrdinalIgnoreCase)
+               || connectionString.Contains("localhost:8081", StringComparison.OrdinalIgnoreCase)
                || connectionString.Contains("127.0.0.1:8081", StringComparison.OrdinalIgnoreCase);
     }
 
