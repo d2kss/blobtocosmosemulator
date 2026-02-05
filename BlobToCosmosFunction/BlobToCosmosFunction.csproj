@@ -24,7 +24,6 @@
   <ItemGroup>
     <None Remove="HOST-JSON-INFO.md" />
     <None Remove="README-AZURE-COSMOSDB.md" />
-    <None Remove="README-NO-SSL.md" />
     <None Remove="README-PHONE-NUMBERS.md" />
     <None Remove="README.md" />
     <None Remove="setup-cosmosdb-network-access.ps1" />

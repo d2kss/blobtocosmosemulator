@@ -45,43 +45,17 @@ public class BlobTriggerFunction
             // Initialize CosmosDB if needed
             await _cosmosDbService.InitializeAsync();
 
-            // Process blob content line by line to reduce memory utilization
-            //var savedPhoneNumbers = new List<PhoneNumber>();
-            var totalLines = 0;
-            var processedLines = 0;
-            var duplicateCount = 0;
-
             _logger.LogInformation("Processing blob '{FileName}' line by line to reduce memory usage", blobName);
 
-            // Process each line from the stream
             await foreach (var line in _fileParserService.ReadLinesAsync(blobContent))
             {
-                totalLines++;
-                processedLines++;
-
-                // Extract phone number from current line
                 var phoneNumber = _phoneNumberService.ExtractPhoneNumberFromLine(line, blobName);
-                
                 if (phoneNumber != null)
                 {
-                    // Save phone number directly to Cosmos DB (with delta detection - only insert new phone numbers)
-                    var savedPhoneNumber = await _cosmosDbService.SavePhoneNumberAsync(phoneNumber, blobName);
-                    
-                    if (savedPhoneNumber != null)
-                    {
-                        
-                    }
-                    else
-                    {
-                        // Duplicate phone number (skipped)
-                        duplicateCount++;
-                    }
+                    await _cosmosDbService.SavePhoneNumberAsync(phoneNumber, blobName);
                 }
-
-               
             }
 
-            
 
             // Move the blob to archive container after successful processing (instead of deleting)
             var moved = await _blobStorageService.MoveBlobToArchiveAsync(containerName, blobName);

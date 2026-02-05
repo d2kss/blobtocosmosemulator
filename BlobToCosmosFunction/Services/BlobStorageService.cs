@@ -7,8 +7,6 @@ namespace BlobToCosmosFunction.Services;
 
 public interface IBlobStorageService
 {
-    Task<Stream> ReadBlobAsync(string containerName, string blobName);
-    Task<bool> DeleteBlobAsync(string containerName, string blobName);
     Task<bool> MoveBlobToArchiveAsync(string sourceContainerName, string blobName, string? archiveContainerName = null);
 }
 
@@ -38,59 +36,6 @@ public class BlobStorageService : IBlobStorageService
         _logger.LogInformation("Using connection string authentication for blob storage");
     }
 
-    public async Task<Stream> ReadBlobAsync(string containerName, string blobName)
-    {
-        try
-        {
-            _logger.LogInformation("Reading blob: {ContainerName}/{BlobName}", containerName, blobName);
-
-            var containerClient = _blobServiceClient.GetBlobContainerClient(containerName);
-            var blobClient = containerClient.GetBlobClient(blobName);
-
-            if (!await blobClient.ExistsAsync())
-            {
-                throw new FileNotFoundException($"Blob {blobName} not found in container {containerName}");
-            }
-
-            var response = await blobClient.DownloadStreamingAsync();
-            return response.Value.Content;
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error reading blob: {ContainerName}/{BlobName}", containerName, blobName);
-            throw;
-        }
-    }
-
-    public async Task<bool> DeleteBlobAsync(string containerName, string blobName)
-    {
-        try
-        {
-            _logger.LogInformation("Deleting blob: {ContainerName}/{BlobName}", containerName, blobName);
-
-            var containerClient = _blobServiceClient.GetBlobContainerClient(containerName);
-            var blobClient = containerClient.GetBlobClient(blobName);
-
-            var result = await blobClient.DeleteIfExistsAsync();
-
-            if (result.Value)
-            {
-                _logger.LogInformation("Successfully deleted blob: {ContainerName}/{BlobName}", containerName, blobName);
-                return true;
-            }
-            else
-            {
-                _logger.LogWarning("Blob does not exist: {ContainerName}/{BlobName}", containerName, blobName);
-                return false;
-            }
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error deleting blob: {ContainerName}/{BlobName}", containerName, blobName);
-            return false;
-        }
-    }
-
     /// <summary>
     /// Move blob from source container to archive container (copy then delete from source).
     /// </summary>
@@ -103,7 +48,7 @@ public class BlobStorageService : IBlobStorageService
                 ?? _configuration["ArchiveContainerName"]
                 ?? "archive";
 
-            _logger.LogInformation("Moving blob to archive: {SourceContainer}/{BlobName} -> {ArchiveContainer}/{BlobName}",
+            _logger.LogInformation("Moving blob to archive: {SourceContainer}/{BlobName} -> {ArchiveContainer}",
                 sourceContainerName, blobName, archiveContainer);
 
             var sourceContainerClient = _blobServiceClient.GetBlobContainerClient(sourceContainerName);
@@ -133,8 +78,8 @@ public class BlobStorageService : IBlobStorageService
             var deleted = await sourceBlobClient.DeleteIfExistsAsync();
             if (deleted.Value)
             {
-                _logger.LogInformation("Successfully moved blob to archive: {SourceContainer}/{BlobName} -> {ArchiveContainer}/{BlobName}",
-                    sourceContainerName, blobName, archiveContainer, blobName);
+                _logger.LogInformation("Successfully moved blob to archive: {SourceContainer}/{BlobName} -> {ArchiveContainer}",
+                    sourceContainerName, blobName, archiveContainer);
                 return true;
             }
 

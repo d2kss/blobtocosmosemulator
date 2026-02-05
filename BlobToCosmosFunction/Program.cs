@@ -1,6 +1,4 @@
 using System.Net;
-using System.Net.Security;
-using System.Security.Cryptography.X509Certificates;
 using BlobToCosmosFunction.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.DependencyInjection;
@@ -22,18 +20,9 @@ var host = new HostBuilder()
         services.AddSingleton<IFileParserService, FileParserService>();
         services.AddSingleton<IPhoneNumberService, PhoneNumberService>();
 
-        // Use local JSON storage (no SSL) when corporate firewall blocks Cosmos DB emulator
-        var useLocalStorage = context.Configuration["UseLocalStorage"];
-        if (string.Equals(useLocalStorage, "true", StringComparison.OrdinalIgnoreCase))
-        {
-            services.AddSingleton<ICosmosDbService, LocalStorageCosmosDbService>();
-        }
-        else
-        {
-            services.AddSingleton<ICosmosDbService, CosmosDbService>();
-        }
+        services.AddSingleton<ICosmosDbService, CosmosDbService>();
 
-        // Initialize CosmosDB or local storage on startup
+        // Initialize CosmosDB on startup
         services.AddSingleton<IHostedService, CosmosDbInitializationService>();
     })
     .ConfigureLogging(logging =>
@@ -45,11 +34,9 @@ var host = new HostBuilder()
 // Log startup information
 var loggerFactory = host.Services.GetRequiredService<ILoggerFactory>();
 var logger = loggerFactory.CreateLogger("Startup");
-var config = host.Services.GetRequiredService<Microsoft.Extensions.Configuration.IConfiguration>();
-var useLocal = config["UseLocalStorage"];
 logger.LogInformation("========================================");
 logger.LogInformation("Azure Function Starting...");
-logger.LogInformation("  - Storage: {Mode}", string.Equals(useLocal, "true", StringComparison.OrdinalIgnoreCase) ? "Local (no SSL)" : "Cosmos DB (emulator or Azure)");
+logger.LogInformation("  - Storage: Cosmos DB (emulator or Azure)");
 logger.LogInformation("Blob Trigger: input-files/{{name}}, Polling: 1s");
 logger.LogInformation("========================================");
 
