@@ -2,6 +2,7 @@ using BlobToCosmosFunction.Models;
 using BlobToCosmosFunction.Services;
 using Microsoft.Azure.Functions.Worker;
 using Microsoft.Extensions.Logging;
+using System.IO;
 
 namespace BlobToCosmosFunction.Functions;
 
@@ -29,88 +30,71 @@ public class BlobTriggerFunction
 
     [Function("BlobTriggerFunction")]
     public async Task Run(
-        [BlobTrigger("input-files/{name}", Connection = "AzureWebJobsStorage")] byte[] blobContent,
+        [BlobTrigger("input-files/{name}", Connection = "AzureWebJobsStorage")] Stream blobContent,
         string name,
         FunctionContext context)
     {
         var blobName = name;
         _logger.LogInformation("=== BLOB TRIGGER FIRED ===");
         _logger.LogInformation("Blob trigger function processed blob: {Name} from container: input-files", blobName);
-        _logger.LogInformation("Blob content size: {Size} bytes", blobContent?.Length ?? 0);
-
+        
         try
         {
             const string containerName = "input-files";
 
-            // Read blob using BlobStorageService (same approach as ReadBlobFunction)
-            // This allows us to use SAS tokens or connection strings consistently
-            using var blobStream = await _blobStorageService.ReadBlobAsync(containerName, blobName);
-
-            // Parse the blob content
-            var fileData = await _fileParserService.ParseBlobContentAsync(blobStream, blobName);
-
             // Initialize CosmosDB if needed
             await _cosmosDbService.InitializeAsync();
 
-            // Extract phone numbers from blob content
-            var phoneNumbers = _phoneNumberService.ExtractPhoneNumbers(fileData.Content, blobName);
-            if (phoneNumbers.Any())
+            // Process blob content line by line to reduce memory utilization
+            //var savedPhoneNumbers = new List<PhoneNumber>();
+            var totalLines = 0;
+            var processedLines = 0;
+            var duplicateCount = 0;
+
+            _logger.LogInformation("Processing blob '{FileName}' line by line to reduce memory usage", blobName);
+
+            // Process each line from the stream
+            await foreach (var line in _fileParserService.ReadLinesAsync(blobContent))
             {
-                // Save phone numbers directly to Cosmos DB (identify delta changes - only insert new phone numbers)
-                var savedPhoneNumbers = await _cosmosDbService.SavePhoneNumbersAsync(phoneNumbers, blobName);
+                totalLines++;
+                processedLines++;
+
+                // Extract phone number from current line
+                var phoneNumber = _phoneNumberService.ExtractPhoneNumberFromLine(line, blobName);
                 
-               
-
-                // TODO: Insert new phone numbers into API
-                // The savedPhoneNumbers list contains only the new phone numbers (delta changes) that were inserted into Cosmos DB.
-                // These phone numbers need to be sent to the external API for further processing.
-                if (savedPhoneNumbers.Any())
+                if (phoneNumber != null)
                 {
-                    _logger.LogInformation("Found {Count} new phone numbers ready for API insertion", savedPhoneNumbers.Count);
+                    // Save phone number directly to Cosmos DB (with delta detection - only insert new phone numbers)
+                    var savedPhoneNumber = await _cosmosDbService.SavePhoneNumberAsync(phoneNumber, blobName);
                     
-                    foreach (var phoneNumber in savedPhoneNumbers)
+                    if (savedPhoneNumber != null)
                     {
-                        try
-                        {
-                            // TODO: Insert each new phone number into API
-                            // Example: await _apiService.InsertPhoneNumberAsync(phoneNumber);
-                            // The phoneNumber object contains all the details needed for API insertion:
-                            // - phoneNumber.Number: The original phone number format
-                            // - phoneNumber.NormalizedNumber: The normalized phone number (digits only)
-                            // - phoneNumber.Id: Unique identifier
-                            // - phoneNumber.SourceFile: Source file name
-                            // - phoneNumber.FirstSeenAt: First seen timestamp
-                            
-                            _logger.LogDebug("Processing phone number '{PhoneNumber}' for API insertion", phoneNumber.NormalizedNumber);
-                        }
-                        catch (Exception ex)
-                        {
-                            _logger.LogError(ex, "Error processing phone number '{PhoneNumber}' for API insertion", 
-                                phoneNumber?.NormalizedNumber ?? "unknown");
-                            // Continue with next phone number instead of failing entire batch
-                        }
+                        
                     }
-                    
-                    _logger.LogInformation("Completed processing {Count} new phone numbers for API insertion", savedPhoneNumbers.Count);
+                    else
+                    {
+                        // Duplicate phone number (skipped)
+                        duplicateCount++;
+                    }
                 }
+
+               
+            }
+
+            
+
+            // Move the blob to archive container after successful processing (instead of deleting)
+            var moved = await _blobStorageService.MoveBlobToArchiveAsync(containerName, blobName);
+            if (moved)
+            {
+                _logger.LogInformation("Successfully moved blob to archive after processing: {Name}", blobName);
             }
             else
             {
-                _logger.LogInformation("No phone numbers found in file: {Name}", blobName);
+                _logger.LogWarning("Blob was not moved to archive (may not exist or move failed): {Name}", blobName);
             }
 
-            // Delete the blob after successful processing
-            var deleted = await _blobStorageService.DeleteBlobAsync(containerName, blobName);
-            if (deleted)
-            {
-                _logger.LogInformation("Successfully deleted blob after processing: {Name}", blobName);
-            }
-            else
-            {
-                _logger.LogWarning("Blob was already deleted or does not exist: {Name}", blobName);
-            }
-
-            _logger.LogInformation("Successfully processed and removed blob: {Name}", blobName);
+            _logger.LogInformation("Successfully processed and moved blob to archive: {Name}", blobName);
         }
         catch (Exception ex)
         {

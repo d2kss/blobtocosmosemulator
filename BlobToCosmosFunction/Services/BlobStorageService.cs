@@ -9,6 +9,7 @@ public interface IBlobStorageService
 {
     Task<Stream> ReadBlobAsync(string containerName, string blobName);
     Task<bool> DeleteBlobAsync(string containerName, string blobName);
+    Task<bool> MoveBlobToArchiveAsync(string sourceContainerName, string blobName, string? archiveContainerName = null);
 }
 
 public class BlobStorageService : IBlobStorageService
@@ -88,5 +89,78 @@ public class BlobStorageService : IBlobStorageService
             _logger.LogError(ex, "Error deleting blob: {ContainerName}/{BlobName}", containerName, blobName);
             return false;
         }
+    }
+
+    /// <summary>
+    /// Move blob from source container to archive container (copy then delete from source).
+    /// </summary>
+    public async Task<bool> MoveBlobToArchiveAsync(string sourceContainerName, string blobName, string? archiveContainerName = null)
+    {
+        try
+        {
+            var archiveContainer = archiveContainerName
+                ?? _configuration["BlobArchiveContainerName"]
+                ?? _configuration["ArchiveContainerName"]
+                ?? "archive";
+
+            _logger.LogInformation("Moving blob to archive: {SourceContainer}/{BlobName} -> {ArchiveContainer}/{BlobName}",
+                sourceContainerName, blobName, archiveContainer);
+
+            var sourceContainerClient = _blobServiceClient.GetBlobContainerClient(sourceContainerName);
+            var archiveContainerClient = _blobServiceClient.GetBlobContainerClient(archiveContainer);
+
+            await archiveContainerClient.CreateIfNotExistsAsync(PublicAccessType.None);
+
+            var sourceBlobClient = sourceContainerClient.GetBlobClient(blobName);
+
+            if (!await sourceBlobClient.ExistsAsync())
+            {
+                _logger.LogWarning("Blob does not exist: {ContainerName}/{BlobName}", sourceContainerName, blobName);
+                return false;
+            }
+
+            var destBlobClient = archiveContainerClient.GetBlobClient(blobName);
+
+            await destBlobClient.StartCopyFromUriAsync(sourceBlobClient.Uri);
+
+            var copyComplete = await WaitForCopyCompletionAsync(destBlobClient);
+            if (!copyComplete)
+            {
+                _logger.LogError("Copy to archive did not complete: {ArchiveContainer}/{BlobName}", archiveContainer, blobName);
+                return false;
+            }
+
+            var deleted = await sourceBlobClient.DeleteIfExistsAsync();
+            if (deleted.Value)
+            {
+                _logger.LogInformation("Successfully moved blob to archive: {SourceContainer}/{BlobName} -> {ArchiveContainer}/{BlobName}",
+                    sourceContainerName, blobName, archiveContainer, blobName);
+                return true;
+            }
+
+            _logger.LogWarning("Blob copied to archive but delete from source failed: {ContainerName}/{BlobName}", sourceContainerName, blobName);
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error moving blob to archive: {SourceContainer}/{BlobName}", sourceContainerName, blobName);
+            return false;
+        }
+    }
+
+    private static async Task<bool> WaitForCopyCompletionAsync(BlobClient destBlobClient, int maxWaitSeconds = 120)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(maxWaitSeconds);
+        while (DateTime.UtcNow < deadline)
+        {
+            var props = await destBlobClient.GetPropertiesAsync();
+            var status = props.Value.CopyStatus;
+            if (status == CopyStatus.Success)
+                return true;
+            if (status == CopyStatus.Failed)
+                return false;
+            await Task.Delay(1000);
+        }
+        return false;
     }
 }

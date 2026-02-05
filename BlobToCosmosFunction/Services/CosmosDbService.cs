@@ -10,6 +10,8 @@ public interface ICosmosDbService
     Task InitializeAsync();
     Task<List<PhoneNumber>> SavePhoneNumbersAsync(List<PhoneNumber> phoneNumbers, string sourceFile);
     Task<List<PhoneNumber>> GetNewPhoneNumbersAsync(List<PhoneNumber> phoneNumbers);
+    Task<bool> IsPhoneNumberExistsAsync(string normalizedNumber);
+    Task<PhoneNumber?> SavePhoneNumberAsync(PhoneNumber phoneNumber, string sourceFile);
 }
 
 /// <summary>
@@ -257,6 +259,113 @@ public class CosmosDbService : ICosmosDbService
         {
             _logger.LogError(ex, "Unexpected error saving phone numbers from source '{SourceFile}'", sourceFile);
             throw;
+        }
+    }
+
+    /// <summary>
+    /// Check if a phone number exists in Cosmos DB by normalized number.
+    /// </summary>
+    public async Task<bool> IsPhoneNumberExistsAsync(string normalizedNumber)
+    {
+        try
+        {
+            if (_container == null)
+            {
+                await InitializeAsync();
+            }
+
+            if (string.IsNullOrWhiteSpace(normalizedNumber))
+            {
+                return false;
+            }
+
+            // Query for existing phone number with this normalized number
+            var query = new QueryDefinition("SELECT * FROM c WHERE c.NormalizedNumber = @normalizedNumber")
+                .WithParameter("@normalizedNumber", normalizedNumber);
+
+            var queryIterator = _container!.GetItemQueryIterator<PhoneNumber>(
+                query,
+                requestOptions: new QueryRequestOptions
+                {
+                    PartitionKey = new PartitionKey(normalizedNumber)
+                });
+
+            var results = await queryIterator.ReadNextAsync();
+            return results.Any();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error checking if phone number '{NormalizedNumber}' exists. Treating as new.", normalizedNumber);
+            // On error, treat as new to be safe
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Save a single phone number to Cosmos DB (line-by-line processing with delta detection).
+    /// </summary>
+    public async Task<PhoneNumber?> SavePhoneNumberAsync(PhoneNumber phoneNumber, string sourceFile)
+    {
+        if (phoneNumber == null || string.IsNullOrWhiteSpace(phoneNumber.NormalizedNumber))
+        {
+            return null;
+        }
+
+        try
+        {
+            if (_container == null)
+            {
+                await InitializeAsync();
+            }
+
+            // Check if phone number already exists (delta detection)
+            var exists = await IsPhoneNumberExistsAsync(phoneNumber.NormalizedNumber);
+            if (exists)
+            {
+                // Skip duplicate - not a new phone number
+                return null;
+            }
+
+            // Set phone number properties
+            phoneNumber.SourceFile = sourceFile;
+            phoneNumber.FirstSeenAt = DateTime.UtcNow;
+            phoneNumber.LastSeenAt = DateTime.UtcNow;
+            phoneNumber.OccurrenceCount = 1;
+
+            if (phoneNumber.SourceFiles == null)
+            {
+                phoneNumber.SourceFiles = new List<string>();
+            }
+            if (!phoneNumber.SourceFiles.Contains(sourceFile))
+            {
+                phoneNumber.SourceFiles.Add(sourceFile);
+            }
+
+            // Insert new phone number
+            var response = await _container!.CreateItemAsync(
+                item: phoneNumber,
+                partitionKey: new PartitionKey(phoneNumber.NormalizedNumber));
+
+            return response.Resource;
+        }
+        catch (CosmosException ex) when (ex.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            // Conflict - item was inserted by another process, skip
+            _logger.LogWarning("Phone number '{PhoneNumber}' already exists (conflict). Skipping.", 
+                phoneNumber?.NormalizedNumber ?? "unknown");
+            return null;
+        }
+        catch (CosmosException ex)
+        {
+            _logger.LogError(ex, "Failed to insert phone number '{PhoneNumber}' from source '{SourceFile}'. Status: {StatusCode}", 
+                phoneNumber?.NormalizedNumber ?? "unknown", sourceFile, ex.StatusCode);
+            return null;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Unexpected error inserting phone number '{PhoneNumber}' from source '{SourceFile}'", 
+                phoneNumber?.NormalizedNumber ?? "unknown", sourceFile);
+            return null;
         }
     }
 }

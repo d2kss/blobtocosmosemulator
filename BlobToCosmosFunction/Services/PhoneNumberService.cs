@@ -8,6 +8,7 @@ public interface IPhoneNumberService
 {
     List<PhoneNumber> ExtractPhoneNumbers(string content, string sourceFile);
     string NormalizePhoneNumber(string phoneNumber);
+    PhoneNumber? ExtractPhoneNumberFromLine(string line, string sourceFile);
 }
 
 public class PhoneNumberService : IPhoneNumberService
@@ -83,5 +84,38 @@ public class PhoneNumberService : IPhoneNumberService
         var normalized = Regex.Replace(phoneNumber, @"[^\d]", "");
         
         return normalized;
+    }
+
+    /// <summary>
+    /// Extract phone number from a single line (for line-by-line processing).
+    /// </summary>
+    public PhoneNumber? ExtractPhoneNumberFromLine(string line, string sourceFile)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+            return null;
+
+        var phoneNumber = line.Trim();
+
+        // Skip empty lines
+        if (string.IsNullOrWhiteSpace(phoneNumber))
+            return null;
+
+        // Check if line contains any digit - if yes, store it (no other validation)
+        if (!phoneNumber.Any(char.IsDigit))
+            return null;
+
+        var normalized = NormalizePhoneNumber(phoneNumber);
+
+        // Return phone number object
+        return new PhoneNumber
+        {
+            Number = phoneNumber, // Store original format as received - no validation
+            NormalizedNumber = normalized, // Normalized for duplicate detection only
+            SourceFile = sourceFile,
+            FirstSeenAt = DateTime.UtcNow,
+            LastSeenAt = DateTime.UtcNow,
+            OccurrenceCount = 1,
+            SourceFiles = new List<string> { sourceFile }
+        };
     }
 }

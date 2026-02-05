@@ -97,6 +97,44 @@ public class LocalStorageCosmosDbService : ICosmosDbService
         return Task.FromResult(saved);
     }
 
+    public Task<List<PhoneNumber>> GetNewPhoneNumbersAsync(List<PhoneNumber> phoneNumbers)
+    {
+        if (!_initialized) throw new InvalidOperationException("Call InitializeAsync first.");
+        if (phoneNumbers == null || phoneNumbers.Count == 0)
+            return Task.FromResult(new List<PhoneNumber>());
+        var newOnes = phoneNumbers.Where(p => !string.IsNullOrEmpty(p.NormalizedNumber) && !_phoneNumbers.ContainsKey(p.NormalizedNumber)).ToList();
+        _logger.LogInformation("Identified {NewCount} new phone numbers out of {TotalCount} (delta changes)", newOnes.Count, phoneNumbers.Count);
+        return Task.FromResult(newOnes);
+    }
+
+    public Task<bool> IsPhoneNumberExistsAsync(string normalizedNumber)
+    {
+        if (!_initialized) throw new InvalidOperationException("Call InitializeAsync first.");
+        return Task.FromResult(!string.IsNullOrWhiteSpace(normalizedNumber) && _phoneNumbers.ContainsKey(normalizedNumber));
+    }
+
+    public Task<PhoneNumber?> SavePhoneNumberAsync(PhoneNumber phoneNumber, string sourceFile)
+    {
+        if (!_initialized) throw new InvalidOperationException("Call InitializeAsync first.");
+        if (phoneNumber == null || string.IsNullOrWhiteSpace(phoneNumber.NormalizedNumber))
+            return Task.FromResult<PhoneNumber?>(null);
+        if (_phoneNumbers.ContainsKey(phoneNumber.NormalizedNumber))
+            return Task.FromResult<PhoneNumber?>(null);
+        phoneNumber.SourceFile = sourceFile;
+        phoneNumber.FirstSeenAt = DateTime.UtcNow;
+        phoneNumber.LastSeenAt = DateTime.UtcNow;
+        phoneNumber.OccurrenceCount = 1;
+        phoneNumber.SourceFiles ??= new List<string>();
+        if (!phoneNumber.SourceFiles.Contains(sourceFile)) phoneNumber.SourceFiles.Add(sourceFile);
+        _phoneNumbers[phoneNumber.NormalizedNumber] = phoneNumber;
+        var phonePath = Path.Combine(_basePath, "PhoneNumbers.json");
+        lock (_fileLock)
+        {
+            File.WriteAllText(phonePath, JsonSerializer.Serialize(_phoneNumbers.Values.ToList(), new JsonSerializerOptions { WriteIndented = true }));
+        }
+        return Task.FromResult<PhoneNumber?>(phoneNumber);
+    }
+
     public Task<PhoneNumber?> GetPhoneNumberByNormalizedAsync(string normalizedNumber)
     {
         if (!_initialized) throw new InvalidOperationException("Call InitializeAsync first.");

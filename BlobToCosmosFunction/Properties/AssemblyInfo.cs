@@ -1,7 +1,7 @@
 using System.Reflection;
 using System.Runtime.Versioning;
 
-[assembly: TargetFramework(".NETCoreApp,Version=v8.0", FrameworkDisplayName = ".NET 8.0")]
+[assembly: TargetFramework(".NETCoreApp,Version=v9.0", FrameworkDisplayName = ".NET 9.0")]
 [assembly: AssemblyCompany("BlobToCosmosFunction")]
 [assembly: AssemblyConfiguration("Debug")]
 [assembly: AssemblyFileVersion("1.0.0.0")]

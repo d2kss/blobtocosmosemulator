@@ -7,6 +7,7 @@ namespace BlobToCosmosFunction.Services;
 public interface IFileParserService
 {
     Task<FileData> ParseBlobContentAsync(Stream blobStream, string fileName);
+    IAsyncEnumerable<string> ReadLinesAsync(Stream blobStream);
 }
 
 public class FileParserService : IFileParserService
@@ -22,24 +23,27 @@ public class FileParserService : IFileParserService
     {
         var fileData = new FileData
         {
-            Id = Guid.NewGuid().ToString(), // Ensure Id is explicitly set
+            Id = Guid.NewGuid().ToString(),
             FileName = fileName,
             FileType = Path.GetExtension(fileName).ToLowerInvariant()
         };
 
         try
         {
-            using var reader = new StreamReader(blobStream, Encoding.UTF8);
-            var content = await reader.ReadToEndAsync();
-            fileData.Content = content;
+            var recordCount = 0;
+            var contentBuilder = new StringBuilder();
 
-            // Count lines for record count
-            var lines = content.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
-            fileData.RecordCount = lines.Length;
+            await foreach (var line in ReadLinesAsync(blobStream))
+            {
+                recordCount++;
+                contentBuilder.AppendLine(line);
+            }
 
+            fileData.Content = contentBuilder.ToString();
+            fileData.RecordCount = recordCount;
             fileData.Status = "Processed";
-            _logger.LogInformation("Successfully read file: {FileName}, Size: {Size} bytes, Lines: {LineCount}", 
-                fileName, content.Length, fileData.RecordCount);
+            _logger.LogInformation("Successfully read file: {FileName}, Lines: {LineCount}", 
+                fileName, fileData.RecordCount);
         }
         catch (Exception ex)
         {
@@ -48,5 +52,15 @@ public class FileParserService : IFileParserService
         }
 
         return fileData;
+    }
+
+    public async IAsyncEnumerable<string> ReadLinesAsync(Stream blobStream)
+    {
+        using var reader = new StreamReader(blobStream, Encoding.UTF8);
+        string? line;
+        while ((line = await reader.ReadLineAsync()) != null)
+        {
+            yield return line;
+        }
     }
 }
