@@ -7,9 +7,9 @@ namespace BlobToCosmosFunction.Services;
 
 public interface ICosmosDbService
 {
-    Task InitializeAsync();
-    Task<bool> IsPhoneNumberExistsAsync(string normalizedNumber);
-    Task<PhoneNumber?> SavePhoneNumberAsync(PhoneNumber phoneNumber, string sourceFile);
+    Task InitializeAsync(CancellationToken cancellationToken = default);
+    Task<bool> IsPhoneNumberExistsAsync(string normalizedNumber, CancellationToken cancellationToken = default);
+    Task<PhoneNumber?> SavePhoneNumberAsync(PhoneNumber phoneNumber, string sourceFile, CancellationToken cancellationToken = default);
 }
 
 /// <summary>
@@ -21,14 +21,17 @@ public class CosmosDbService : ICosmosDbService
     private readonly string _databaseName;
     private readonly string _containerName;
     private readonly ILogger<CosmosDbService> _logger;
+    private readonly IEventHubService _eventHubService;
     private Database? _database;
     private Container? _container;
 
     public CosmosDbService(
         IConfiguration configuration,
-        ILogger<CosmosDbService> logger)
+        ILogger<CosmosDbService> logger,
+        IEventHubService eventHubService)
     {
         _logger = logger;
+        _eventHubService = eventHubService;
 
         try
         {
@@ -65,16 +68,17 @@ public class CosmosDbService : ICosmosDbService
     /// <summary>
     /// Create database if it doesn't exist.
     /// </summary>
-    public async Task InitializeAsync()
+    public async Task InitializeAsync(CancellationToken cancellationToken = default)
     {
         try
         {
             _logger.LogInformation("Initializing database '{DatabaseName}' and container '{ContainerName}'", _databaseName, _containerName);
             
-            _database = await _cosmosClient.CreateDatabaseIfNotExistsAsync(_databaseName);
+            _database = await _cosmosClient.CreateDatabaseIfNotExistsAsync(_databaseName, cancellationToken: cancellationToken);
             _container = await _database.CreateContainerIfNotExistsAsync(
                 id: _containerName,
-                partitionKeyPath: "/NormalizedNumber");
+                partitionKeyPath: "/NormalizedNumber",
+                cancellationToken: cancellationToken);
             
             _logger.LogInformation("Database '{DatabaseName}' and container '{ContainerName}' ready", _databaseName, _containerName);
         }
@@ -95,13 +99,13 @@ public class CosmosDbService : ICosmosDbService
     /// <summary>
     /// Check if a phone number exists in Cosmos DB by normalized number.
     /// </summary>
-    public async Task<bool> IsPhoneNumberExistsAsync(string normalizedNumber)
+    public async Task<bool> IsPhoneNumberExistsAsync(string normalizedNumber, CancellationToken cancellationToken = default)
     {
         try
         {
             if (_container == null)
             {
-                await InitializeAsync();
+                await InitializeAsync(cancellationToken);
             }
 
             if (string.IsNullOrWhiteSpace(normalizedNumber))
@@ -120,7 +124,7 @@ public class CosmosDbService : ICosmosDbService
                     PartitionKey = new PartitionKey(normalizedNumber)
                 });
 
-            var results = await queryIterator.ReadNextAsync();
+            var results = await queryIterator.ReadNextAsync(cancellationToken);
             return results.Any();
         }
         catch (Exception ex)
@@ -135,7 +139,7 @@ public class CosmosDbService : ICosmosDbService
     /// Save a single phone number to Cosmos DB (line-by-line processing with delta detection).
     /// Checks if phone number exists, inserts if not found, and processes to Event Hub.
     /// </summary>
-    public async Task<PhoneNumber?> SavePhoneNumberAsync(PhoneNumber phoneNumber, string sourceFile)
+    public async Task<PhoneNumber?> SavePhoneNumberAsync(PhoneNumber phoneNumber, string sourceFile, CancellationToken cancellationToken = default)
     {
         if (phoneNumber == null || string.IsNullOrWhiteSpace(phoneNumber.NormalizedNumber))
         {
@@ -148,11 +152,11 @@ public class CosmosDbService : ICosmosDbService
             // Ensure container is initialized
             if (_container == null)
             {
-                await InitializeAsync();
+                await InitializeAsync(cancellationToken);
             }
 
             // Step 1: Check if phone number already exists in Cosmos DB
-            var exists = await IsPhoneNumberExistsAsync(phoneNumber.NormalizedNumber);
+            var exists = await IsPhoneNumberExistsAsync(phoneNumber.NormalizedNumber, cancellationToken);
             
             PhoneNumber? savedPhoneNumber = null;
             bool wasInserted = false;
@@ -188,7 +192,8 @@ public class CosmosDbService : ICosmosDbService
                     // Insert new phone number into Cosmos DB
                     var response = await _container!.CreateItemAsync(
                         item: phoneNumber,
-                        partitionKey: new PartitionKey(phoneNumber.NormalizedNumber));
+                        partitionKey: new PartitionKey(phoneNumber.NormalizedNumber),
+                        cancellationToken: cancellationToken);
 
                     savedPhoneNumber = response.Resource;
                     wasInserted = true;
@@ -205,28 +210,15 @@ public class CosmosDbService : ICosmosDbService
                 }
             }
 
-            // Step 3: Process phone number to Event Hub (placeholder for future implementation)
+            // Step 3: Publish phone number event to Event Hub
             try
             {
-                // TODO: Implement Event Hub processing
-                // Example structure:
-                // await _eventHubService.SendPhoneNumberAsync(phoneNumber, sourceFile, wasInserted);
-                // 
-                // This block should:
-                // - Send phone number data to Event Hub
-                // - Include metadata: sourceFile, wasInserted flag (indicates if this was a new insert), timestamp
-                // - Handle Event Hub errors gracefully (log but don't fail the Cosmos DB operation)
-                // 
-                // Note: wasInserted = true means phone number was newly inserted, false means it already existed
-                _ = wasInserted; // Placeholder - will be used in Event Hub implementation
-                
-                _logger.LogDebug("Event Hub processing placeholder for phone number '{NormalizedNumber}' (Inserted: {WasInserted})", 
-                    phoneNumber.NormalizedNumber, wasInserted);
+                await _eventHubService.SendPhoneNumberAsync(phoneNumber, sourceFile, wasInserted, cancellationToken);
             }
             catch (Exception ex)
             {
                 // Log Event Hub errors but don't fail the operation
-                _logger.LogWarning(ex, "Error processing phone number '{NormalizedNumber}' to Event Hub. Cosmos DB operation succeeded.", 
+                _logger.LogWarning(ex, "Error publishing phone number '{NormalizedNumber}' to Event Hub. Cosmos DB operation succeeded.", 
                     phoneNumber.NormalizedNumber);
             }
 

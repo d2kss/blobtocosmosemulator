@@ -34,47 +34,89 @@ public class BlobTriggerFunction
         string name,
         FunctionContext context)
     {
+        var cancellationToken = context.CancellationToken;
         var blobName = name;
         _logger.LogInformation("=== BLOB TRIGGER FIRED ===");
         _logger.LogInformation("Blob trigger function processed blob: {Name} from container: input-files", blobName);
         
+        const string containerName = "input-files";
+        bool processingSuccessful = false;
+        int processedCount = 0;
+        int errorCount = 0;
+
         try
         {
-            const string containerName = "input-files";
-
             // Initialize CosmosDB if needed
-            await _cosmosDbService.InitializeAsync();
+            await _cosmosDbService.InitializeAsync(cancellationToken);
 
             _logger.LogInformation("Processing blob '{FileName}' line by line to reduce memory usage", blobName);
 
+            // Process all lines
             await foreach (var line in _fileParserService.ReadLinesAsync(blobContent))
             {
-                var phoneNumber = _phoneNumberService.ExtractPhoneNumberFromLine(line, blobName);
-                if (phoneNumber != null)
+                cancellationToken.ThrowIfCancellationRequested();
+                
+                try
                 {
-                    await _cosmosDbService.SavePhoneNumberAsync(phoneNumber, blobName);
+                    var phoneNumber = _phoneNumberService.ExtractPhoneNumberFromLine(line, blobName);
+                    if (phoneNumber != null)
+                    {
+                        await _cosmosDbService.SavePhoneNumberAsync(phoneNumber, blobName, cancellationToken);
+                        processedCount++;
+                    }
+                }
+                catch (Exception lineEx)
+                {
+                    errorCount++;
+                    _logger.LogWarning(lineEx, "Error processing line in blob '{FileName}'. Continuing with next line.", blobName);
+                    // Continue processing remaining lines even if one fails
                 }
             }
 
-
-            // Move the blob to archive container after successful processing (instead of deleting)
-            var moved = await _blobStorageService.MoveBlobToArchiveAsync(containerName, blobName);
-            if (moved)
+            // Mark as successful only if no errors occurred during processing
+            processingSuccessful = errorCount == 0;
+            
+            if (processingSuccessful)
             {
-                _logger.LogInformation("Successfully moved blob to archive after processing: {Name}", blobName);
+                _logger.LogInformation("Successfully processed blob '{FileName}'. Processed {Count} phone numbers.", blobName, processedCount);
             }
             else
             {
-                _logger.LogWarning("Blob was not moved to archive (may not exist or move failed): {Name}", blobName);
+                _logger.LogWarning("Blob '{FileName}' processed with {ErrorCount} errors. Processed {ProcessedCount} phone numbers successfully. File will NOT be archived.", 
+                    blobName, errorCount, processedCount);
             }
-
-            _logger.LogInformation("Successfully processed and moved blob to archive: {Name}", blobName);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "Error processing blob: {Name}", blobName);
-            // Don't delete blob if processing failed - allows for retry
+            _logger.LogError(ex, "Critical error processing blob: {Name}. File will NOT be archived.", blobName);
+            // Don't archive blob if processing failed - allows for retry
             throw;
+        }
+
+        // Only archive if processing completed successfully (no errors)
+        if (processingSuccessful)
+        {
+            try
+            {
+                var moved = await _blobStorageService.MoveBlobToArchiveAsync(containerName, blobName);
+                if (moved)
+                {
+                    _logger.LogInformation("Successfully moved blob to archive after processing: {Name}", blobName);
+                }
+                else
+                {
+                    _logger.LogWarning("Blob was not moved to archive (may not exist or move failed): {Name}", blobName);
+                }
+            }
+            catch (Exception archiveEx)
+            {
+                _logger.LogError(archiveEx, "Error archiving blob '{Name}' after successful processing. Blob remains in input container.", blobName);
+                // Don't throw - processing was successful, archiving failure is non-critical
+            }
+        }
+        else
+        {
+            _logger.LogInformation("Blob '{Name}' will remain in input container for retry due to processing errors.", blobName);
         }
     }
 }

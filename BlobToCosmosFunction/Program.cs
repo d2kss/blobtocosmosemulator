@@ -1,29 +1,27 @@
 using System.Net;
 using BlobToCosmosFunction.Services;
 using Microsoft.Azure.Functions.Worker;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 
-// TLS 1.2/1.3 for Cosmos DB
-ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls13;
-
-// When using emulator, bypass SSL process-wide (Cosmos SDK may use HTTP paths that ignore CosmosClientOptions)
-TryEnableEmulatorSslBypass();
 
 var host = new HostBuilder()
     .ConfigureFunctionsWorkerDefaults()
     .ConfigureServices((context, services) =>
     {
-        // Register services
+        // Register IConfiguration explicitly
+        services.AddSingleton<IConfiguration>(context.Configuration);
+
+        // Register services with IConfiguration injection
         services.AddSingleton<IBlobStorageService, BlobStorageService>();
         services.AddSingleton<IFileParserService, FileParserService>();
         services.AddSingleton<IPhoneNumberService, PhoneNumberService>();
-
         services.AddSingleton<ICosmosDbService, CosmosDbService>();
-
-        // Initialize CosmosDB on startup
-        services.AddSingleton<IHostedService, CosmosDbInitializationService>();
+        
+        // Register Event Hub service
+        services.AddSingleton<IEventHubService, EventHubService>();
     })
     .ConfigureLogging(logging =>
     {
@@ -41,55 +39,3 @@ logger.LogInformation("Blob Trigger: input-files/{{name}}, Polling: 1s");
 logger.LogInformation("========================================");
 
 host.Run();
-
-static void TryEnableEmulatorSslBypass()
-{
-    try
-    {
-        var path = Path.Combine(AppContext.BaseDirectory, "local.settings.json");
-        if (!File.Exists(path)) return;
-        var json = File.ReadAllText(path);
-        // Check for any localhost port (emulator can run on any port)
-        var isEmulator = json.Contains("localhost:", StringComparison.OrdinalIgnoreCase)
-                         || json.Contains("127.0.0.1:", StringComparison.OrdinalIgnoreCase);
-        if (!isEmulator) return;
-        ServicePointManager.ServerCertificateValidationCallback = (_, _, _, _) => true;
-    }
-    catch { /* ignore */ }
-}
-
-// Service to initialize CosmosDB on startup
-public class CosmosDbInitializationService : IHostedService
-{
-    private readonly ICosmosDbService _cosmosDbService;
-    private readonly ILogger<CosmosDbInitializationService> _logger;
-
-    public CosmosDbInitializationService(
-        ICosmosDbService cosmosDbService,
-        ILogger<CosmosDbInitializationService> logger)
-    {
-        _cosmosDbService = cosmosDbService;
-        _logger = logger;
-    }
-
-    public async Task StartAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            _logger.LogInformation("Initializing CosmosDB connection...");
-            await _cosmosDbService.InitializeAsync();
-            _logger.LogInformation("CosmosDB initialization completed");
-        }
-        catch (Exception ex)
-        {
-            _logger.LogError(ex, "Error initializing CosmosDB");
-            // Don't throw - allow function to start even if CosmosDB init fails
-            // It will retry on first blob trigger
-        }
-    }
-
-    public Task StopAsync(CancellationToken cancellationToken)
-    {
-        return Task.CompletedTask;
-    }
-}
